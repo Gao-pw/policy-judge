@@ -55,7 +55,7 @@ jobs:
         run: pnpm check
 
       - name: Build Tauri app
-        run: pnpm tauri:build -- ${{ matrix.args }}
+        run: pnpm exec tauri build ${{ matrix.args }}
 
       - name: Upload bundles artifact
         uses: actions/upload-artifact@v4

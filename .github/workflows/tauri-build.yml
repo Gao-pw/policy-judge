@@ -16,10 +16,20 @@ jobs:
       matrix:
         include:
           - platform: macos-latest
-            args: "--bundles app,dmg"
+            name: macos-apple-silicon
+            rust-target: aarch64-apple-darwin
+            args: "--target aarch64-apple-darwin --bundles app,dmg"
+          - platform: macos-latest
+            name: macos-intel
+            rust-target: x86_64-apple-darwin
+            args: "--target x86_64-apple-darwin --bundles app,dmg"
           - platform: ubuntu-22.04
+            name: ubuntu-22.04
+            rust-target: ""
             args: "--bundles deb,appimage"
           - platform: windows-latest
+            name: windows-latest
+            rust-target: ""
             args: "--bundles nsis"
 
     runs-on: ${{ matrix.platform }}
@@ -42,6 +52,10 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Rust target
+        if: matrix.rust-target != ''
+        run: rustup target add ${{ matrix.rust-target }}
+
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
@@ -60,10 +74,12 @@ jobs:
       - name: Upload bundles artifact
         uses: actions/upload-artifact@v4
         with:
-          name: policy-judge-${{ matrix.platform }}
+          name: policy-judge-${{ matrix.name }}
           retention-days: 7
           path: |
             src-tauri/target/release/bundle/**
+            src-tauri/target/aarch64-apple-darwin/release/bundle/**
+            src-tauri/target/x86_64-apple-darwin/release/bundle/**
             src-tauri/target/universal-apple-darwin/release/bundle/**
 
       - name: Upload bundles to release
@@ -77,5 +93,9 @@ jobs:
             src-tauri/target/release/bundle/**/*.app.tar.gz
             src-tauri/target/release/bundle/**/*.deb
             src-tauri/target/release/bundle/**/*.AppImage
+            src-tauri/target/aarch64-apple-darwin/release/bundle/**/*.dmg
+            src-tauri/target/aarch64-apple-darwin/release/bundle/**/*.app.tar.gz
+            src-tauri/target/x86_64-apple-darwin/release/bundle/**/*.dmg
+            src-tauri/target/x86_64-apple-darwin/release/bundle/**/*.app.tar.gz
             src-tauri/target/universal-apple-darwin/release/bundle/**/*.dmg
             src-tauri/target/universal-apple-darwin/release/bundle/**/*.app.tar.gz

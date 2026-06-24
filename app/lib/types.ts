@@ -1,6 +1,9 @@
+export type FirewallVendor = "huawei" | "h3c" | "dptech";
+
 export interface AnalyzeRequest {
   fileContent: string;
   targetCIDR: string;
+  vendor: FirewallVendor;
 }
 
 export type AddressRef =

@@ -14,7 +14,7 @@ import {
 import { Download, FileText, Loader2, RotateCcw, Search, ShieldCheck, UploadCloud } from "lucide-react";
 import * as XLSX from "xlsx";
 import { analyzeConfig } from "./lib/parser";
-import type { AddressRef, AnalyzeResult, PolicyRule } from "./lib/types";
+import type { AddressRef, AnalyzeResult, FirewallVendor, PolicyRule } from "./lib/types";
 
 const DEFAULT_TARGET = "10.124.0.0/16";
 const MAX_SIZE = 20 * 1024 * 1024;
@@ -25,6 +25,7 @@ type ResultState = AnalyzeResult | null;
 export default function HomePage() {
   const [file, setFile] = useState<File | null>(null);
   const [fileContent, setFileContent] = useState("");
+  const [vendor, setVendor] = useState<FirewallVendor>("huawei");
   const [targetCIDR, setTargetCIDR] = useState(DEFAULT_TARGET);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [result, setResult] = useState<ResultState>(null);
@@ -119,7 +120,7 @@ export default function HomePage() {
 
     try {
       await new Promise((resolve) => window.setTimeout(resolve, 0));
-      const data = analyzeConfig(fileContent, targetCIDR);
+      const data = analyzeConfig(fileContent, targetCIDR, vendor);
       setSearchText("");
       setResult(data);
     } catch (caughtError) {
@@ -132,6 +133,7 @@ export default function HomePage() {
   const reset = () => {
     setFile(null);
     setFileContent("");
+    setVendor("huawei");
     setTargetCIDR(DEFAULT_TARGET);
     setResult(null);
     setSearchText("");
@@ -166,10 +168,10 @@ export default function HomePage() {
             <ShieldCheck className="h-7 w-7" />
           </div>
           <div>
-            <p className="text-sm font-semibold text-blue-700">Huawei Firewall Policy Analyzer</p>
+            <p className="text-sm font-semibold text-blue-700">Firewall Policy Analyzer</p>
             <h1 className="mt-2 text-3xl font-bold tracking-tight text-slate-950">防火墙策略检测工具</h1>
             <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-600">
-              上传华为防火墙配置，输入测试区网段，自动展开 address-set 并筛选源地址涉及目标网段的安全策略。
+              上传华为、华三或迪普防火墙配置，输入测试区网段，自动展开地址对象并筛选源地址涉及目标网段的安全策略。
             </p>
           </div>
         </div>
@@ -199,7 +201,24 @@ export default function HomePage() {
         </div>
 
         <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
-          <h2 className="text-base font-semibold text-slate-900">2. 输入目标网段</h2>
+          <h2 className="text-base font-semibold text-slate-900">2. 选择厂商并输入目标网段</h2>
+          <label className="mt-4 block text-sm font-medium text-slate-700" htmlFor="vendor">
+            防火墙厂商
+          </label>
+          <select
+            id="vendor"
+            value={vendor}
+            onChange={(event) => {
+              setVendor(event.target.value as FirewallVendor);
+              setResult(null);
+              setSearchText("");
+            }}
+            className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+          >
+            <option value="huawei">华为</option>
+            <option value="h3c">华三 H3C</option>
+            <option value="dptech">迪普 DPTech</option>
+          </select>
           <label className="mt-4 block text-sm font-medium text-slate-700" htmlFor="cidr">
             测试区网段
           </label>

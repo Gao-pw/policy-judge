@@ -44,6 +44,10 @@ export function parseFirewallAddress(parts: string[]): RangeRecord | null {
     return rangeFromIps(parts[1], parts[2], `${parts[1]}-${parts[2]}`);
   }
 
+  if (parts[0] === "network") {
+    return parseH3cObjectAddress(parts.slice(1));
+  }
+
   const ip = parts[0];
   if (!ip) return null;
 
@@ -57,6 +61,11 @@ export function parseFirewallAddress(parts: string[]): RangeRecord | null {
     return cidrToRange(`${ip}/${prefix}`);
   }
 
+  if (parts[1] && isIPv4(parts[1])) {
+    const prefix = wildcardToPrefix(parts[1]);
+    return cidrToRange(`${ip}/${prefix}`);
+  }
+
   if (ip.includes("/")) {
     return cidrToRange(ip);
   }
@@ -65,8 +74,34 @@ export function parseFirewallAddress(parts: string[]): RangeRecord | null {
   return { start: value, end: value, label: `${ip}/32` };
 }
 
+export function parseAddressToken(value: string): RangeRecord | null {
+  const text = value.trim();
+  if (!text || text === "any") return null;
+  if (text.includes("-")) {
+    const [start, end] = text.split("-").map((part) => part.trim());
+    if (isIPv4(start) && isIPv4(end)) return rangeFromIps(start, end, text);
+  }
+  if (text.includes("/")) return cidrToRange(text);
+  if (isIPv4(text)) return parseFirewallAddress([text]);
+  return null;
+}
+
 export function doRangesOverlap(a: RangeRecord, b: RangeRecord): boolean {
   return a.start <= b.end && b.start <= a.end;
+}
+
+function parseH3cObjectAddress(parts: string[]): RangeRecord | null {
+  if (parts[0] === "host" && parts[1] === "address" && parts[2]) {
+    return parseFirewallAddress([parts[2]]);
+  }
+  if (parts[0] === "range" && parts[1] && parts[2]) {
+    return rangeFromIps(parts[1], parts[2], `${parts[1]}-${parts[2]}`);
+  }
+  if (parts[0] === "subnet" && parts[1] && parts[2]) {
+    const prefix = maskToPrefix(parts[2]);
+    return cidrToRange(`${parts[1]}/${prefix}`);
+  }
+  return null;
 }
 
 function cidrToRange(cidr: string): RangeRecord {
@@ -92,7 +127,7 @@ function rangeFromIps(startIp: string, endIp: string, label: string): RangeRecor
 }
 
 function ipToNumber(ip: string): number {
-  if (!Address4.isValid(ip)) {
+  if (!isIPv4(ip)) {
     throw new Error("invalid ip");
   }
   return addressToNumber(new Address4(ip));
@@ -100,6 +135,10 @@ function ipToNumber(ip: string): number {
 
 function addressToNumber(address: Address4): number {
   return Number(address.bigInteger().toString());
+}
+
+function isIPv4(value: string): boolean {
+  return Address4.isValid(value);
 }
 
 function maskToPrefix(mask: string): number {

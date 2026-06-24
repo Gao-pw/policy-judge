@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { analyzeConfig } from "@/app/lib/parser";
 import { isValidTargetRange } from "@/app/lib/ip-utils";
-import type { AnalyzeRequest } from "@/app/lib/types";
+import type { AnalyzeRequest, FirewallVendor } from "@/app/lib/types";
 
 export async function POST(request: Request) {
   try {
@@ -18,11 +18,17 @@ export async function POST(request: Request) {
       );
     }
 
-    return NextResponse.json(analyzeConfig(body.fileContent, body.targetCIDR));
+    const vendor = isFirewallVendor(body.vendor) ? body.vendor : "huawei";
+
+    return NextResponse.json(analyzeConfig(body.fileContent, body.targetCIDR, vendor));
   } catch (error) {
     return NextResponse.json(
       { success: false, error: error instanceof Error ? error.message : "配置文件解析失败" },
       { status: 400 },
     );
   }
+}
+
+function isFirewallVendor(value: unknown): value is FirewallVendor {
+  return value === "huawei" || value === "h3c" || value === "dptech";
 }

@@ -1,42 +1,31 @@
 import { Address4 } from "ip-address";
-import type { RangeRecord } from "./types";
 
 const IPV4_MAX = 0xffffffff;
 
-export function isValidTargetRange(value: string): boolean {
+export function parseTargetRanges(target: string): RangeRecord[] {
+  return target
+    .split(/\s*,\s*/)
+    .filter(Boolean)
+    .map((item) => {
+      const trimmed = item.trim();
+      if (trimmed.includes("-")) {
+        const [start, end] = trimmed.split("-").map((part) => part.trim());
+        return rangeFromIps(start, end, trimmed);
+      }
+      if (trimmed.includes("/")) {
+        return cidrToRange(trimmed);
+      }
+      return cidrToRange(`${trimmed}/32`);
+    });
+}
+
+export function isValidTargetRange(target: string): boolean {
   try {
-    parseTargetRanges(value);
+    parseTargetRanges(target);
     return true;
   } catch {
     return false;
   }
-}
-
-export function parseTargetRanges(value: string): RangeRecord[] {
-  const ranges = value
-    .split(",")
-    .map((part) => part.trim())
-    .filter(Boolean)
-    .map(parseTargetRange);
-
-  if (ranges.length === 0) {
-    throw new Error("empty target range");
-  }
-
-  return ranges;
-}
-
-export function parseTargetRange(value: string): RangeRecord {
-  const text = value.trim();
-  if (text.includes("-")) {
-    const [start, end] = text.split("-").map((part) => part.trim());
-    return rangeFromIps(start, end, text);
-  }
-  if (text.includes("/")) {
-    return cidrToRange(text);
-  }
-  const ip = ipToNumber(text);
-  return { start: ip, end: ip, label: `${text}/32` };
 }
 
 export function parseFirewallAddress(parts: string[]): RangeRecord | null {
@@ -77,10 +66,16 @@ export function parseFirewallAddress(parts: string[]): RangeRecord | null {
 export function parseAddressToken(value: string): RangeRecord | null {
   const text = value.trim();
   if (!text || text === "any") return null;
-  if (text.includes("-")) {
-    const [start, end] = text.split("-").map((part) => part.trim());
+
+  const dashIndex = text.indexOf("-");
+  if (dashIndex > 0) {
+    const start = text.slice(0, dashIndex).trim();
+    const endOrSuffix = text.slice(dashIndex + 1).trim();
+    const end = endOrSuffix.match(/^\d+$/) && start.includes(".") ? `${start.substring(0, start.lastIndexOf(".") + 1)}${endOrSuffix}` : endOrSuffix;
+
     if (isIPv4(start) && isIPv4(end)) return rangeFromIps(start, end, text);
   }
+
   if (text.includes("/")) return cidrToRange(text);
   if (isIPv4(text)) return parseFirewallAddress([text]);
   return null;
@@ -105,8 +100,15 @@ function parseH3cObjectAddress(parts: string[]): RangeRecord | null {
 }
 
 function cidrToRange(cidr: string): RangeRecord {
+  const slashIndex = cidr.indexOf("/");
+  if (slashIndex > 0 && cidr.substring(slashIndex + 1).includes(".")) {
+    const mask = cidr.substring(slashIndex + 1);
+    const prefix = maskToPrefix(mask);
+    return cidrToRange(`${cidr.substring(0, slashIndex)}/${prefix}`);
+  }
+
   if (!Address4.isValid(cidr)) {
-    throw new Error("invalid cidr");
+    throw new Error(`invalid cidr: ${cidr}`);
   }
   const address = new Address4(cidr);
 
@@ -168,4 +170,10 @@ function wildcardToPrefix(wildcard: string): number {
     .map((shift) => (maskValue >>> shift) & 255)
     .join(".");
   return maskToPrefix(mask);
+}
+
+export interface RangeRecord {
+  start: number;
+  end: number;
+  label: string;
 }

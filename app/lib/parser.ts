@@ -1,5 +1,16 @@
-import { doRangesOverlap, parseAddressToken, parseFirewallAddress, parseTargetRanges } from "./ip-utils";
-import type { AddressRef, AddressSetEntry, AnalyzeResult, FirewallVendor, PolicyRule, RangeRecord } from "./types";
+import { doRangesOverlap, isRangeCoveredBy, parseAddressToken, parseFirewallAddress, parseTargetRanges } from "./ip-utils";
+import type {
+  AddressRef,
+  AddressSetEntry,
+  AnalyzeResult,
+  FirewallVendor,
+  PolicyQuery,
+  PolicyRule,
+  QueryMatchDetail,
+  QueryResult,
+  QueryResultRule,
+  RangeRecord,
+} from "./types";
 
 type AddressSetMap = Map<string, AddressSetEntry[]>;
 
@@ -28,6 +39,7 @@ export function analyzeConfig(fileContent: string, targetCIDR: string, vendor: F
 
   return {
     success: true,
+    mode: "filter",
     totalRules: rawRules.length,
     matchedRules: rules.length,
     rules,
@@ -482,4 +494,385 @@ function matchesAnyTarget(range: RangeRecord, targetRanges: RangeRecord[]): bool
 
 function unique(values: string[]): string[] {
   return Array.from(new Set(values.filter(Boolean)));
+}
+
+/* ======================= 五元组查询 ======================= */
+
+const PORT_MIN = 0;
+const PORT_MAX = 65535;
+
+/** 服务定义中的单条端口/协议条目 */
+interface ServiceEntry {
+  protocol: string; // tcp / udp / icmp / ip / any
+  srcPort: RangeRecord;
+  dstPort: RangeRecord;
+}
+
+type ServiceMap = Map<string, ServiceEntry[]>;
+
+/** 常见预定义服务名到端口的映射（配置里未显式定义时兜底） */
+const WELL_KNOWN_SERVICES: Record<string, ServiceEntry> = {
+  ftp: makeService("tcp", 21),
+  ssh: makeService("tcp", 22),
+  telnet: makeService("tcp", 23),
+  dns: makeService("udp", 53),
+  http: makeService("tcp", 80),
+  https: makeService("tcp", 443),
+};
+
+function makeService(protocol: string, port: number): ServiceEntry {
+  return { protocol, srcPort: fullPort(), dstPort: portRange(port, port) };
+}
+
+function fullPort(): RangeRecord {
+  return { start: PORT_MIN, end: PORT_MAX, label: "any" };
+}
+
+function portRange(start: number, end: number): RangeRecord {
+  return { start, end, label: start === end ? `${start}` : `${start}-${end}` };
+}
+
+/**
+ * 按查询条件搜索可覆盖需求的安全策略
+ *
+ * 覆盖语义：策略的源/目的区域、源/目的地址、服务端口范围都必须包含查询需求，
+ * 查询条件留空的维度视为不限制（自动满足）。放行与拒绝策略都会返回并标注动作。
+ */
+export function queryPolicies(fileContent: string, query: PolicyQuery, vendor: FirewallVendor = "huawei"): QueryResult {
+  const addressSets = parseAddressSets(fileContent, vendor);
+  const serviceMap = parseServiceSets(fileContent, vendor);
+  const rawRules = parseSecurityPolicies(fileContent, vendor);
+
+  if (rawRules.length === 0) {
+    throw new Error("配置文件格式无法识别，请检查厂商类型是否选择正确");
+  }
+
+  // 预解析查询条件
+  const queryZoneSrc = query.sourceZone.trim().toLowerCase();
+  const queryZoneDst = query.destinationZone.trim().toLowerCase();
+  const querySrcRanges = query.sourceAddress.trim() ? parseTargetRanges(query.sourceAddress) : [];
+  const queryDstRanges = query.destinationAddress.trim() ? parseTargetRanges(query.destinationAddress) : [];
+  const querySrcPorts = parsePortQuery(query.sourcePort);
+  const queryDstPorts = parsePortQuery(query.destinationPort);
+
+  const rules: QueryResultRule[] = [];
+
+  for (const raw of rawRules) {
+    const detail: QueryMatchDetail = {
+      sourceZone: isZoneCovered(queryZoneSrc, raw.sourceZone),
+      destinationZone: isZoneCovered(queryZoneDst, raw.destinationZone),
+      sourceAddress: isAddressCovered(querySrcRanges, raw.sourceAddresses, addressSets),
+      destinationAddress: isAddressCovered(queryDstRanges, raw.destinationAddresses, addressSets),
+      service: isServiceCovered(query, querySrcPorts, queryDstPorts, raw.services, serviceMap),
+    };
+
+    const fullyCovered =
+      detail.sourceZone && detail.destinationZone && detail.sourceAddress && detail.destinationAddress && detail.service;
+
+    if (!fullyCovered) continue;
+
+    const normalized = normalizeRule(raw, addressSets, []);
+    rules.push({ ...normalized, fullyCovered, detail });
+  }
+
+  return {
+    success: true,
+    mode: "query",
+    totalRules: rawRules.length,
+    matchedRules: rules.length,
+    rules,
+  };
+}
+
+/** 区域覆盖：查询留空、或策略未限制区域、或策略区域包含查询区域时命中 */
+function isZoneCovered(queryZone: string, ruleZones: string[]): boolean {
+  if (!queryZone) return true;
+  if (ruleZones.length === 0) return true;
+  return ruleZones.some((zone) => zone.toLowerCase() === queryZone);
+}
+
+/** 地址覆盖：查询留空、或策略地址为 any、或策略地址并集完全包含查询的每个地址范围 */
+function isAddressCovered(queryRanges: RangeRecord[], rawAddresses: string[][], addressSets: AddressSetMap): boolean {
+  if (queryRanges.length === 0) return true;
+
+  const resolved = resolveAddressRanges(rawAddresses, addressSets);
+  if (resolved.any) return true;
+  if (resolved.ranges.length === 0) return false;
+
+  return queryRanges.every((range) => isRangeCoveredBy(range, resolved.ranges));
+}
+
+/** 把策略里的原始地址解析为 IP 区间集合，any 表示不限制 */
+function resolveAddressRanges(rawAddresses: string[][], addressSets: AddressSetMap): { any: boolean; ranges: RangeRecord[] } {
+  if (rawAddresses.length === 0) return { any: true, ranges: [] };
+
+  const ranges: RangeRecord[] = [];
+
+  for (const parts of rawAddresses) {
+    if (parts[0] === "any") return { any: true, ranges: [] };
+
+    if (parts[0] === "address-set" && parts[1]) {
+      const name = parts.slice(1).join(" ");
+      const entries = addressSets.get(name) ?? [];
+      if (entries.length === 0) {
+        const direct = safeParse(() => parseAddressToken(name));
+        if (direct) ranges.push(direct);
+      } else {
+        entries.forEach((entry) => ranges.push(entry.range));
+      }
+      continue;
+    }
+
+    const range = safeParse(() => (parts.length === 1 ? parseAddressToken(parts[0]) : parseFirewallAddress(parts)));
+    if (range) ranges.push(range);
+  }
+
+  return { any: false, ranges };
+}
+
+/** 服务覆盖：查询未限制协议和端口时直接命中，否则要求策略服务端口范围覆盖查询 */
+function isServiceCovered(
+  query: PolicyQuery,
+  querySrcPorts: RangeRecord[],
+  queryDstPorts: RangeRecord[],
+  ruleServices: string[],
+  serviceMap: ServiceMap,
+): boolean {
+  const noProtocol = query.protocol === "any";
+  if (noProtocol && querySrcPorts.length === 0 && queryDstPorts.length === 0) return true;
+
+  // 策略无服务字段视为 any，覆盖一切
+  if (ruleServices.length === 0) return true;
+
+  const entries = resolveServiceEntries(ruleServices, serviceMap);
+  if (entries.length === 0) return false;
+
+  const relevant = entries.filter((entry) => matchProtocol(entry.protocol, query.protocol));
+  if (relevant.length === 0) return false;
+
+  if (queryDstPorts.length > 0) {
+    const dstRanges = relevant.map((entry) => entry.dstPort);
+    if (!queryDstPorts.every((range) => isRangeCoveredBy(range, dstRanges))) return false;
+  }
+
+  if (querySrcPorts.length > 0) {
+    const srcRanges = relevant.map((entry) => entry.srcPort);
+    if (!querySrcPorts.every((range) => isRangeCoveredBy(range, srcRanges))) return false;
+  }
+
+  return true;
+}
+
+function matchProtocol(entryProtocol: string, queryProtocol: string): boolean {
+  if (entryProtocol === "ip" || entryProtocol === "any") return true;
+  if (queryProtocol === "any") return true;
+  return entryProtocol === queryProtocol;
+}
+
+/** 把策略引用的服务名解析成端口条目 */
+function resolveServiceEntries(ruleServices: string[], serviceMap: ServiceMap): ServiceEntry[] {
+  const result: ServiceEntry[] = [];
+
+  for (const raw of ruleServices) {
+    // 迪普格式：service-object 名称
+    const name = raw.replace(/^service-object\s+/i, "").trim();
+    const entries = serviceMap.get(name) ?? serviceMap.get(raw.trim());
+    if (entries && entries.length > 0) {
+      result.push(...entries);
+      continue;
+    }
+
+    const known = WELL_KNOWN_SERVICES[name.toLowerCase()];
+    if (known) result.push(known);
+  }
+
+  return result;
+}
+
+/** 解析查询里的端口输入，支持 "80"、"80-90"、"80,443" */
+function parsePortQuery(text: string): RangeRecord[] {
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+
+  const ranges: RangeRecord[] = [];
+  for (const part of trimmed.split(/\s*,\s*/).filter(Boolean)) {
+    const rangeMatch = part.match(/^(\d+)\s*-\s*(\d+)$/);
+    if (rangeMatch) {
+      ranges.push(portRange(Number(rangeMatch[1]), Number(rangeMatch[2])));
+      continue;
+    }
+    if (/^\d+$/.test(part)) {
+      ranges.push(portRange(Number(part), Number(part)));
+    }
+  }
+
+  return ranges;
+}
+
+function safeParse(fn: () => RangeRecord | null): RangeRecord | null {
+  try {
+    return fn();
+  } catch {
+    return null;
+  }
+}
+
+/* ======================= 服务定义解析 ======================= */
+
+function parseServiceSets(content: string, vendor: FirewallVendor): ServiceMap {
+  if (vendor === "h3c") return parseH3cServiceSets(content);
+  if (vendor === "dptech") return parseDptechServiceSets(content);
+  return parseHuaweiServiceSets(content);
+}
+
+/**
+ * 华为服务集
+ *   ip service-set BJlianb type object
+ *    service 0 protocol tcp destination-port 22
+ *    service 3 protocol tcp destination-port 1803 to 1893
+ */
+function parseHuaweiServiceSets(content: string): ServiceMap {
+  const map: ServiceMap = new Map();
+  let currentName: string | null = null;
+
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    const header = line.match(/^ip\s+service-set\s+(\S+)\s+type\s+object/i);
+
+    if (header) {
+      currentName = header[1];
+      map.set(currentName, []);
+      continue;
+    }
+
+    if (line === "#") {
+      currentName = null;
+      continue;
+    }
+
+    if (!currentName || !line.startsWith("service ")) continue;
+
+    const protocolMatch = line.match(/protocol\s+(\S+)/i);
+    if (!protocolMatch) continue;
+    const protocol = protocolMatch[1].toLowerCase();
+
+    const entry: ServiceEntry = {
+      protocol,
+      srcPort: parsePortClause(line, "source-port") ?? fullPort(),
+      dstPort: parsePortClause(line, "destination-port") ?? fullPort(),
+    };
+    map.get(currentName)!.push(entry);
+  }
+
+  return map;
+}
+
+/** 解析华为 "destination-port 3300 to 3330" / "source-port 22" 端口子句 */
+function parsePortClause(line: string, keyword: string): RangeRecord | null {
+  const range = line.match(new RegExp(`${keyword}\\s+(\\d+)\\s+to\\s+(\\d+)`, "i"));
+  if (range) return portRange(Number(range[1]), Number(range[2]));
+  const single = line.match(new RegExp(`${keyword}\\s+(\\d+)`, "i"));
+  if (single) return portRange(Number(single[1]), Number(single[1]));
+  return null;
+}
+
+/**
+ * 华三服务组
+ *   object-group service dst_yinhangyunhua
+ *    0 service tcp destination range 18070 18071
+ *    1 service tcp destination eq 25406
+ *    0 service tcp destination gt 1024
+ *    0 service icmp
+ */
+function parseH3cServiceSets(content: string): ServiceMap {
+  const map: ServiceMap = new Map();
+  let currentName: string | null = null;
+
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    const header = line.match(/^object-group\s+service\s+(.+)$/i);
+
+    if (header) {
+      currentName = stripQuotes(header[1].trim());
+      map.set(currentName, []);
+      continue;
+    }
+
+    if (line === "#") {
+      currentName = null;
+      continue;
+    }
+
+    if (!currentName) continue;
+    const parts = line.split(/\s+/);
+    if (!/^\d+$/.test(parts[0]) || parts[1] !== "service") continue;
+
+    const protocol = parts[2]?.toLowerCase();
+    if (!protocol) continue;
+
+    const entry: ServiceEntry = {
+      protocol,
+      srcPort: parseH3cPortOperator(parts, "source") ?? fullPort(),
+      dstPort: parseH3cPortOperator(parts, "destination") ?? fullPort(),
+    };
+    map.get(currentName)!.push(entry);
+  }
+
+  return map;
+}
+
+/** 解析华三 "destination eq 22" / "destination range 18070 18071" / "destination gt 1024" */
+function parseH3cPortOperator(parts: string[], direction: string): RangeRecord | null {
+  const index = parts.indexOf(direction);
+  if (index < 0) return null;
+
+  const operator = parts[index + 1];
+  const value = Number(parts[index + 2]);
+
+  if (operator === "eq") return portRange(value, value);
+  if (operator === "gt") return portRange(value + 1, PORT_MAX);
+  if (operator === "lt") return portRange(PORT_MIN, value - 1);
+  if (operator === "range") return portRange(value, Number(parts[index + 3]));
+  return null;
+}
+
+/**
+ * 迪普服务对象
+ *   service-object TCP80 protocol tcp src-port 0 to 65535 dst-port 80 to 80
+ */
+function parseDptechServiceSets(content: string): ServiceMap {
+  const map: ServiceMap = new Map();
+
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line.startsWith("service-object ")) continue;
+
+    const parts = line.split(/\s+/);
+    const name = parts[1];
+    const protocolMatch = line.match(/protocol\s+(\S+)/i);
+    if (!name || !protocolMatch) continue;
+
+    const entry: ServiceEntry = {
+      protocol: protocolMatch[1].toLowerCase(),
+      srcPort: parseDptechPort(line, "src-port") ?? fullPort(),
+      dstPort: parseDptechPort(line, "dst-port") ?? fullPort(),
+    };
+
+    const entries = map.get(name) ?? [];
+    entries.push(entry);
+    map.set(name, entries);
+  }
+
+  return map;
+}
+
+/** 解析迪普 "dst-port 80 to 80" / "src-port 0 to 65535" */
+function parseDptechPort(line: string, keyword: string): RangeRecord | null {
+  const match = line.match(new RegExp(`${keyword}\\s+(\\d+)\\s+to\\s+(\\d+)`, "i"));
+  if (match) return portRange(Number(match[1]), Number(match[2]));
+  return null;
+}
+
+function stripQuotes(value: string): string {
+  return value.replace(/^"(.*)"$/, "$1");
 }

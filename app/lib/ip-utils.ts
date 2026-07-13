@@ -85,6 +85,30 @@ export function doRangesOverlap(a: RangeRecord, b: RangeRecord): boolean {
   return a.start <= b.end && b.start <= a.end;
 }
 
+/** 合并多个可能重叠的区间，返回排序去重后的区间列表 */
+export function mergeRanges(ranges: RangeRecord[]): RangeRecord[] {
+  if (ranges.length === 0) return [];
+  const sorted = [...ranges].sort((a, b) => a.start - b.start);
+  const merged: RangeRecord[] = [{ ...sorted[0] }];
+
+  for (let i = 1; i < sorted.length; i += 1) {
+    const last = merged[merged.length - 1];
+    const current = sorted[i];
+    if (current.start <= last.end + 1) {
+      last.end = Math.max(last.end, current.end);
+    } else {
+      merged.push({ ...current });
+    }
+  }
+
+  return merged;
+}
+
+/** 判断 inner 区间是否被 ranges 的并集完全覆盖 */
+export function isRangeCoveredBy(inner: RangeRecord, ranges: RangeRecord[]): boolean {
+  return mergeRanges(ranges).some((range) => range.start <= inner.start && inner.end <= range.end);
+}
+
 function parseH3cObjectAddress(parts: string[]): RangeRecord | null {
   if (parts[0] === "host" && parts[1] === "address" && parts[2]) {
     return parseFirewallAddress([parts[2]]);

@@ -13,20 +13,33 @@ import {
 } from "@tanstack/react-table";
 import { Download, FileText, Loader2, RotateCcw, Search, ShieldCheck, UploadCloud } from "lucide-react";
 import * as XLSX from "xlsx";
-import { analyzeConfig } from "./lib/parser";
-import type { AddressRef, AnalyzeResult, FirewallVendor, PolicyRule } from "./lib/types";
+import { analyzeConfig, queryPolicies } from "./lib/parser";
+import type { AddressRef, AnalyzeResult, FirewallVendor, PolicyQuery, PolicyRule, QueryProtocol, QueryResult } from "./lib/types";
 
 const DEFAULT_TARGET = "10.124.0.0/16";
 const MAX_SIZE = 20 * 1024 * 1024;
 const ACCEPTED_EXTENSIONS = [".txt", ".cfg", ".log"];
 
-type ResultState = AnalyzeResult | null;
+type Mode = "filter" | "query";
+type ResultState = AnalyzeResult | QueryResult | null;
+
+const EMPTY_QUERY: PolicyQuery = {
+  sourceZone: "",
+  destinationZone: "",
+  sourceAddress: "",
+  destinationAddress: "",
+  protocol: "any",
+  sourcePort: "",
+  destinationPort: "",
+};
 
 export default function HomePage() {
   const [file, setFile] = useState<File | null>(null);
   const [fileContent, setFileContent] = useState("");
   const [vendor, setVendor] = useState<FirewallVendor>("huawei");
+  const [mode, setMode] = useState<Mode>("filter");
   const [targetCIDR, setTargetCIDR] = useState(DEFAULT_TARGET);
+  const [query, setQuery] = useState<PolicyQuery>(EMPTY_QUERY);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [result, setResult] = useState<ResultState>(null);
   const [error, setError] = useState<string | null>(null);
@@ -81,7 +94,11 @@ export default function HomePage() {
         cell: ({ row }) => <AddressList addresses={row.original.destinationAddresses} />,
       },
       { accessorKey: "service", header: "服务" },
-      { accessorKey: "action", header: "动作" },
+      {
+        accessorKey: "action",
+        header: "动作",
+        cell: ({ row }) => <ActionBadge action={row.original.action} />,
+      },
     ],
     [],
   );
@@ -120,7 +137,7 @@ export default function HomePage() {
 
     try {
       await new Promise((resolve) => window.setTimeout(resolve, 0));
-      const data = analyzeConfig(fileContent, targetCIDR, vendor);
+      const data = mode === "filter" ? analyzeConfig(fileContent, targetCIDR, vendor) : queryPolicies(fileContent, query, vendor);
       setSearchText("");
       setResult(data);
     } catch (caughtError) {
@@ -135,10 +152,18 @@ export default function HomePage() {
     setFileContent("");
     setVendor("huawei");
     setTargetCIDR(DEFAULT_TARGET);
+    setQuery(EMPTY_QUERY);
     setResult(null);
     setSearchText("");
     setError(null);
     setIsAnalyzing(false);
+  };
+
+  const switchMode = (next: Mode) => {
+    setMode(next);
+    setResult(null);
+    setSearchText("");
+    setError(null);
   };
 
   const exportExcel = () => {
@@ -156,7 +181,8 @@ export default function HomePage() {
 
     const worksheet = XLSX.utils.json_to_sheet(rows);
     const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "命中策略");
+    const sheetName = result.mode === "query" ? "可用策略" : "命中策略";
+    XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
     XLSX.writeFile(workbook, "firewall-policy-result.xlsx");
   };
 
@@ -171,9 +197,27 @@ export default function HomePage() {
             <p className="text-sm font-semibold text-blue-700">Firewall Policy Analyzer</p>
             <h1 className="mt-2 text-3xl font-bold tracking-tight text-slate-950">防火墙策略检测工具</h1>
             <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-600">
-              上传华为、华三或迪普防火墙配置，输入测试区网段，自动展开地址对象并筛选源地址涉及目标网段的安全策略。
+              上传华为、华三或迪普防火墙配置，支持按网段筛选涉及策略，或按自定义五元组查询可用的安全策略。
             </p>
           </div>
+        </div>
+        <div className="mt-6 inline-flex rounded-2xl border border-slate-200 bg-slate-50 p-1">
+          <button
+            onClick={() => switchMode("filter")}
+            className={`rounded-xl px-5 py-2 text-sm font-semibold transition ${
+              mode === "filter" ? "bg-blue-600 text-white shadow" : "text-slate-600 hover:text-blue-700"
+            }`}
+          >
+            网段筛选
+          </button>
+          <button
+            onClick={() => switchMode("query")}
+            className={`rounded-xl px-5 py-2 text-sm font-semibold transition ${
+              mode === "query" ? "bg-blue-600 text-white shadow" : "text-slate-600 hover:text-blue-700"
+            }`}
+          >
+            五元组查询
+          </button>
         </div>
       </header>
 
@@ -201,7 +245,9 @@ export default function HomePage() {
         </div>
 
         <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
-          <h2 className="text-base font-semibold text-slate-900">2. 选择厂商并输入目标网段</h2>
+          <h2 className="text-base font-semibold text-slate-900">
+            2. 选择厂商并{mode === "filter" ? "输入目标网段" : "填写查询条件"}
+          </h2>
           <label className="mt-4 block text-sm font-medium text-slate-700" htmlFor="vendor">
             防火墙厂商
           </label>
@@ -219,17 +265,49 @@ export default function HomePage() {
             <option value="h3c">华三 H3C</option>
             <option value="dptech">迪普 DPTech</option>
           </select>
-          <label className="mt-4 block text-sm font-medium text-slate-700" htmlFor="cidr">
-            测试区网段
-          </label>
-          <input
-            id="cidr"
-            value={targetCIDR}
-            onChange={(event) => setTargetCIDR(event.target.value)}
-            className="mt-2 w-full rounded-xl border border-slate-300 px-4 py-3 font-mono text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
-            placeholder="10.124.0.0/16, 10.161.10.0/24"
-          />
-          <p className="mt-2 text-xs text-slate-500">支持 CIDR、单 IP 或范围格式，多个目标请用英文逗号分隔，例如 10.124.0.0/16, 10.161.10.1-10.161.10.20</p>
+
+          {mode === "filter" ? (
+            <>
+              <label className="mt-4 block text-sm font-medium text-slate-700" htmlFor="cidr">
+                测试区网段
+              </label>
+              <input
+                id="cidr"
+                value={targetCIDR}
+                onChange={(event) => setTargetCIDR(event.target.value)}
+                className="mt-2 w-full rounded-xl border border-slate-300 px-4 py-3 font-mono text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+                placeholder="10.124.0.0/16, 10.161.10.0/24"
+              />
+              <p className="mt-2 text-xs text-slate-500">
+                支持 CIDR、单 IP 或范围格式，多个目标请用英文逗号分隔，例如 10.124.0.0/16, 10.161.10.1-10.161.10.20
+              </p>
+            </>
+          ) : (
+            <div className="mt-4 grid grid-cols-2 gap-3">
+              <QueryField label="源区域" value={query.sourceZone} onChange={(v) => setQuery({ ...query, sourceZone: v })} placeholder="留空=任意" />
+              <QueryField label="目的区域" value={query.destinationZone} onChange={(v) => setQuery({ ...query, destinationZone: v })} placeholder="留空=任意" />
+              <QueryField label="源地址" value={query.sourceAddress} onChange={(v) => setQuery({ ...query, sourceAddress: v })} placeholder="10.124.0.1 / 段" mono />
+              <QueryField label="目的地址" value={query.destinationAddress} onChange={(v) => setQuery({ ...query, destinationAddress: v })} placeholder="10.161.10.0/24" mono />
+              <div>
+                <label className="block text-xs font-medium text-slate-600">协议</label>
+                <select
+                  value={query.protocol}
+                  onChange={(event) => setQuery({ ...query, protocol: event.target.value as QueryProtocol })}
+                  className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+                >
+                  <option value="any">任意</option>
+                  <option value="tcp">TCP</option>
+                  <option value="udp">UDP</option>
+                </select>
+              </div>
+              <QueryField label="目的端口" value={query.destinationPort} onChange={(v) => setQuery({ ...query, destinationPort: v })} placeholder="443 / 80-90" mono />
+              <QueryField label="源端口" value={query.sourcePort} onChange={(v) => setQuery({ ...query, sourcePort: v })} placeholder="留空=任意" mono />
+              <div className="col-span-2 rounded-xl bg-slate-50 px-3 py-2 text-xs text-slate-500">
+                任意字段留空表示不限制。返回能完全覆盖该需求的策略，并标注放行/拒绝。
+              </div>
+            </div>
+          )}
+
           <div className="mt-6 flex flex-wrap gap-3">
             <button
               onClick={analyze}
@@ -237,7 +315,7 @@ export default function HomePage() {
               className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {isAnalyzing ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldCheck className="h-4 w-4" />}
-              开始检测
+              {mode === "filter" ? "开始检测" : "查询策略"}
             </button>
             <button
               onClick={reset}
@@ -257,7 +335,8 @@ export default function HomePage() {
           {result && (
             <div className="flex flex-wrap items-center justify-between gap-4">
               <p className="text-sm text-slate-700">
-                共发现 <span className="font-bold text-slate-950">{result.totalRules}</span> 条策略，命中{" "}
+                共发现 <span className="font-bold text-slate-950">{result.totalRules}</span> 条策略，
+                {result.mode === "query" ? "可用" : "命中"}{" "}
                 <span className="font-bold text-green-700">{result.matchedRules}</span> 条。
               </p>
               <button
@@ -278,11 +357,15 @@ export default function HomePage() {
           <div className="border-b border-slate-200 p-5">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
               <div>
-                <h2 className="text-base font-semibold text-slate-900">检测结果</h2>
-                {result.rules.length === 0 && <p className="mt-2 text-sm text-slate-500">未找到涉及该网段的策略</p>}
+                <h2 className="text-base font-semibold text-slate-900">{result.mode === "query" ? "可用策略" : "检测结果"}</h2>
+                {result.rules.length === 0 && (
+                  <p className="mt-2 text-sm text-slate-500">
+                    {result.mode === "query" ? "未找到可覆盖该需求的策略" : "未找到涉及该网段的策略"}
+                  </p>
+                )}
                 {result.rules.length > 0 && (
                   <p className="mt-2 text-xs text-slate-500">
-                    当前显示 {filteredRules.length} 条，原始命中 {result.rules.length} 条
+                    当前显示 {filteredRules.length} 条，共 {result.rules.length} 条
                   </p>
                 )}
               </div>
@@ -395,6 +478,46 @@ export default function HomePage() {
       )}
     </main>
   );
+}
+
+function QueryField({
+  label,
+  value,
+  onChange,
+  placeholder,
+  mono,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  mono?: boolean;
+}) {
+  return (
+    <div>
+      <label className="block text-xs font-medium text-slate-600">{label}</label>
+      <input
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+        className={`mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100 ${
+          mono ? "font-mono" : ""
+        }`}
+      />
+    </div>
+  );
+}
+
+function ActionBadge({ action }: { action: string }) {
+  const normalized = action.toLowerCase();
+  const isPermit = normalized === "permit" || normalized === "pass";
+  const isDeny = normalized === "deny" || normalized === "drop" || normalized === "reject";
+  const cls = isPermit
+    ? "bg-green-100 text-green-800"
+    : isDeny
+      ? "bg-red-100 text-red-700"
+      : "bg-slate-100 text-slate-600";
+  return <span className={`inline-flex rounded-lg px-2 py-1 text-xs font-medium ${cls}`}>{action}</span>;
 }
 
 function AddressList({ addresses }: { addresses: AddressRef[] }) {

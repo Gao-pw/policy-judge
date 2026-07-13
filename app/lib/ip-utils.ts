@@ -4,7 +4,7 @@ const IPV4_MAX = 0xffffffff;
 
 export function parseTargetRanges(target: string): RangeRecord[] {
   return target
-    .split(/\s*,\s*/)
+    .split(/\s*,\s*|\r?\n/)
     .filter(Boolean)
     .map((item) => {
       const trimmed = item.trim();

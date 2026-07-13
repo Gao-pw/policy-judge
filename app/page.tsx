@@ -286,8 +286,8 @@ export default function HomePage() {
             <div className="mt-4 grid grid-cols-2 gap-3">
               <QueryField label="源区域" value={query.sourceZone} onChange={(v) => setQuery({ ...query, sourceZone: v })} placeholder="留空=任意" />
               <QueryField label="目的区域" value={query.destinationZone} onChange={(v) => setQuery({ ...query, destinationZone: v })} placeholder="留空=任意" />
-              <QueryField label="源地址" value={query.sourceAddress} onChange={(v) => setQuery({ ...query, sourceAddress: v })} placeholder="10.124.0.1 / 段" mono />
-              <QueryField label="目的地址" value={query.destinationAddress} onChange={(v) => setQuery({ ...query, destinationAddress: v })} placeholder="10.161.10.0/24" mono />
+              <QueryField label="源地址" value={query.sourceAddress} onChange={(v) => setQuery({ ...query, sourceAddress: v })} placeholder="10.124.152.132, 10.124.153.0/24" mono multiline />
+              <QueryField label="目的地址" value={query.destinationAddress} onChange={(v) => setQuery({ ...query, destinationAddress: v })} placeholder="10.161.10.0/24, 10.161.11.5" mono multiline />
               <div>
                 <label className="block text-xs font-medium text-slate-600">协议</label>
                 <select
@@ -300,10 +300,10 @@ export default function HomePage() {
                   <option value="udp">UDP</option>
                 </select>
               </div>
-              <QueryField label="目的端口" value={query.destinationPort} onChange={(v) => setQuery({ ...query, destinationPort: v })} placeholder="443 / 80-90" mono />
+              <QueryField label="目的端口" value={query.destinationPort} onChange={(v) => setQuery({ ...query, destinationPort: v })} placeholder="443, 8080-8090" mono />
               <QueryField label="源端口" value={query.sourcePort} onChange={(v) => setQuery({ ...query, sourcePort: v })} placeholder="留空=任意" mono />
               <div className="col-span-2 rounded-xl bg-slate-50 px-3 py-2 text-xs text-slate-500">
-                任意字段留空表示不限制。返回能完全覆盖该需求的策略，并标注放行/拒绝。
+                地址支持多个（英文逗号或换行分隔，无掩码默认 /32），端口支持多个及范围（如 80, 443, 8080-8090）。任意字段留空表示不限制，返回可完全覆盖需求的策略。
               </div>
             </div>
           )}
@@ -486,24 +486,32 @@ function QueryField({
   onChange,
   placeholder,
   mono,
+  multiline,
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
   placeholder?: string;
   mono?: boolean;
+  multiline?: boolean;
 }) {
+  const className = `mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100 ${
+    mono ? "font-mono" : ""
+  }`;
   return (
     <div>
       <label className="block text-xs font-medium text-slate-600">{label}</label>
-      <input
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        placeholder={placeholder}
-        className={`mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100 ${
-          mono ? "font-mono" : ""
-        }`}
-      />
+      {multiline ? (
+        <textarea
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder={placeholder}
+          rows={2}
+          className={`${className} resize-y`}
+        />
+      ) : (
+        <input value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} className={className} />
+      )}
     </div>
   );
 }

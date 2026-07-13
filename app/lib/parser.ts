@@ -689,13 +689,13 @@ function resolveServiceEntries(ruleServices: string[], serviceMap: ServiceMap): 
   return result;
 }
 
-/** 解析查询里的端口输入，支持 "80"、"80-90"、"80,443" */
+/** 解析查询里的端口输入，支持 "80"、"80-90"、"80,443"（英文逗号或换行分隔） */
 function parsePortQuery(text: string): RangeRecord[] {
   const trimmed = text.trim();
   if (!trimmed) return [];
 
   const ranges: RangeRecord[] = [];
-  for (const part of trimmed.split(/\s*,\s*/).filter(Boolean)) {
+  for (const part of trimmed.split(/\s*,\s*|\r?\n/).map((item) => item.trim()).filter(Boolean)) {
     const rangeMatch = part.match(/^(\d+)\s*-\s*(\d+)$/);
     if (rangeMatch) {
       ranges.push(portRange(Number(rangeMatch[1]), Number(rangeMatch[2])));

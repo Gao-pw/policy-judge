@@ -1,6 +1,6 @@
 [package]
 name = "policy-judge"
-version = "0.1.0"
+version = "0.1.11"
 description = "防火墙策略检测工具"
 authors = ["policy-judge"]
 edition = "2021"

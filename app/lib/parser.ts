@@ -682,6 +682,13 @@ function resolveServiceEntries(ruleServices: string[], serviceMap: ServiceMap): 
       continue;
     }
 
+    // 策略行内联的服务定义（华为 protocol.../华三 service-port）
+    const inline = parseInlineService(raw);
+    if (inline) {
+      result.push(inline);
+      continue;
+    }
+
     const known = WELL_KNOWN_SERVICES[name.toLowerCase()];
     if (known) result.push(known);
   }
@@ -821,7 +828,7 @@ function parseH3cServiceSets(content: string): ServiceMap {
   return map;
 }
 
-/** 解析华三 "destination eq 22" / "destination range 18070 18071" / "destination gt 1024" */
+/** 解析华三 "destination eq 22" / "destination range 18070 18071" / "destination gt/ge/lt/le 1024" */
 function parseH3cPortOperator(parts: string[], direction: string): RangeRecord | null {
   const index = parts.indexOf(direction);
   if (index < 0) return null;
@@ -831,8 +838,44 @@ function parseH3cPortOperator(parts: string[], direction: string): RangeRecord |
 
   if (operator === "eq") return portRange(value, value);
   if (operator === "gt") return portRange(value + 1, PORT_MAX);
+  if (operator === "ge") return portRange(value, PORT_MAX);
   if (operator === "lt") return portRange(PORT_MIN, value - 1);
+  if (operator === "le") return portRange(PORT_MIN, value);
   if (operator === "range") return portRange(value, Number(parts[index + 3]));
+  return null;
+}
+
+/**
+ * 解析策略行内联的服务定义，返回端口条目；无法识别时返回 null
+ * 支持：
+ *   华为   service protocol tcp destination-port 9300
+ *          service protocol tcp destination-port 1500 to 1600
+ *   华三   service-port tcp destination eq 22
+ *          service-port tcp destination range 18070 18071 / gt/ge/lt/le
+ */
+function parseInlineService(raw: string): ServiceEntry | null {
+  const parts = raw.trim().split(/\s+/);
+
+  // 华为：protocol <tcp|udp> ... destination-port ...
+  const protoIdx = parts.indexOf("protocol");
+  if (protoIdx >= 0 && parts[protoIdx + 1]) {
+    const protocol = parts[protoIdx + 1].toLowerCase();
+    return {
+      protocol,
+      srcPort: parsePortClause(raw, "source-port") ?? fullPort(),
+      dstPort: parsePortClause(raw, "destination-port") ?? fullPort(),
+    };
+  }
+
+  // 华三 service-port：<tcp|udp> destination eq/range/... N
+  if ((parts[0] === "tcp" || parts[0] === "udp" || parts[0] === "icmp") && parts.includes("destination")) {
+    return {
+      protocol: parts[0].toLowerCase(),
+      srcPort: parseH3cPortOperator(parts, "source") ?? fullPort(),
+      dstPort: parseH3cPortOperator(parts, "destination") ?? fullPort(),
+    };
+  }
+
   return null;
 }
 
